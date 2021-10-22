@@ -1,0 +1,14 @@
+[package]
+authors = ["OfekShochat o@shoch.at"]
+name = "sunset-trainer"
+version = "0.0.1"
+
+[dependencies]
+chess = "3.2.0"
+tch = "*"
+easy_reader = "0.5.0"
+fastapprox = "0.3.0"
+serde_derive = "1.0.1"
+toml = "0.5.8"
+serde = "1.0.1"
+ctrlc = "3.2.1"
