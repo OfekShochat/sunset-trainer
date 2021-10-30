@@ -31,7 +31,7 @@ fn create_net(vs: &nn::Path) -> impl Module {
     .add(nn::linear(vs / "fc0", 768, 128, Default::default()))
     .add_fn(|xs| xs.relu())
     .add(nn::linear(vs / "fc1", 128, 1, Default::default()))
-    .add_fn(|xs| xs.relu())
+    .add_fn(|xs| xs.sigmoid())
 }
 
 fn main() {
@@ -56,8 +56,7 @@ fn main() {
   set_handler(move || {
     save(&output_path, vs.variables());
     exit(0);
-  })
-  .expect("Error setting Ctrl-C handler.");
+  }).expect("Error setting Ctrl-C handler.");
   for (step, (x, y)) in (&mut data).enumerate() {
     let loss = net.forward(&x).mse_loss(&y, tch::Reduction::Mean);
     opt.backward_step(&loss);
@@ -78,6 +77,7 @@ fn main() {
     }
     drop(x);
     drop(y);
+    drop(loss)
   }
 }
 
