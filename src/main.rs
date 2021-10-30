@@ -41,6 +41,101 @@ fn get_conv_config() -> nn::ConvConfigND<[i64; 2]> {
   }
 }
 
+fn main() {
+  let mut cfg_str = "".to_string();
+  File::open("config.toml")
+    .unwrap()
+    .read_to_string(&mut cfg_str)
+    .unwrap();
+  let config: Config = from_str(&cfg_str).unwrap();
+
+  let vs = nn::VarStore::new(Device::cuda_if_available());
+  let net = NN::new(10, 128, &vs);
+  let mut opt = nn::sgd(0.9, 0.0, 0.001, true)
+    .build(&vs, config.training.lr)
+    .unwrap();
+
+  let mut data = Data::new(config.training.batch_size, config.workers);
+  let mut running_loss = Tensor::of_slice(&[0.0])
+    .to_device(Device::cuda_if_available())
+    .detach();
+
+  let output_path = config.output_path.clone();
+  set_handler(move || {
+    exit(0);
+  })
+  .expect("Error setting Ctrl-C handler.");
+  for (step, (x, y)) in (&mut data).enumerate() {
+    let (value, policy) = net.forward(&x);
+    let value_loss = value.mse_loss(&y, tch::Reduction::Mean);
+    let policy_loss = policy.cross_entropy_for_logits(&y);
+    let total_loss = value_loss + policy_loss;
+    opt.backward_step(&total_loss);
+    running_loss += &total_loss.detach();
+
+    if step % config.report_freq == config.report_freq - 1 {
+      println!(
+        "step {} loss {:?}",
+        step + 1,
+        (&running_loss /
+          Tensor::of_slice(&[config.report_freq as f32])
+            .to_device(Device::cuda_if_available())
+            .detach())
+      );
+      running_loss = Tensor::of_slice(&[0.0])
+        .to_device(Device::cuda_if_available())
+        .detach();
+    }
+    drop(x);
+    drop(y);
+  }
+}
+
+#[derive(Debug)]
+struct NN {
+  iconv: nn::Conv<[i64; 2]>,
+  blocks: Vec<ResidualBlock>,
+  value_head: ValueHead,
+  policy_head: PolicyHead,
+}
+
+impl NN {
+  pub fn new(block_count: usize, filter_count: i64, vs: &nn::VarStore) -> NN {
+    let mut blocks = vec![];
+    for i in 0..block_count {
+      blocks.push(ResidualBlock::new(&vs.root(), i, 128, 128))
+    }
+    NN {
+      iconv: nn::conv(
+        &vs.root() / "iconv",
+        12,
+        filter_count,
+        [3, 3],
+        nn::ConvConfigND::<[i64; 2]> {
+          stride: [1, 1],
+          padding: [1, 1],
+          dilation: [1, 1],
+          bias: true,
+          groups: 1,
+          ws_init: nn::Init::KaimingUniform,
+          bs_init: nn::Init::Const(0.),
+        },
+      ),
+      blocks,
+      value_head: ValueHead::new(&vs.root(), filter_count),
+      policy_head: PolicyHead::new(&vs.root(), filter_count),
+    }
+  }
+
+  pub fn forward(&self, xs: &Tensor) -> (Tensor, Tensor) {
+    let mut xs = self.iconv.forward(xs);
+    for b in &self.blocks {
+      xs = b.forward(&xs);
+    }
+    (self.value_head.forward(&xs), self.policy_head.forward(&xs))
+  }
+}
+
 #[derive(Debug)]
 struct ResidualBlock {
   conv0: nn::Conv<[i64; 2]>,
@@ -158,101 +253,6 @@ impl Module for PolicyHead {
     let xs = &self.conv0.forward(xs);
     let xs = &xs.flatten(1, -1);
     self.dense.forward(xs)
-  }
-}
-
-#[derive(Debug)]
-struct NN {
-  iconv: nn::Conv<[i64; 2]>,
-  blocks: Vec<ResidualBlock>,
-  value_head: ValueHead,
-  policy_head: PolicyHead,
-}
-
-impl NN {
-  pub fn new(block_count: usize, filter_count: i64, vs: &nn::VarStore) -> NN {
-    let mut blocks = vec![];
-    for i in 0..block_count {
-      blocks.push(ResidualBlock::new(&vs.root(), i, 128, 128))
-    }
-    NN {
-      iconv: nn::conv(
-        &vs.root() / "iconv",
-        12,
-        filter_count,
-        [3, 3],
-        nn::ConvConfigND::<[i64; 2]> {
-          stride: [1, 1],
-          padding: [1, 1],
-          dilation: [1, 1],
-          bias: true,
-          groups: 1,
-          ws_init: nn::Init::KaimingUniform,
-          bs_init: nn::Init::Const(0.),
-        },
-      ),
-      blocks,
-      value_head: ValueHead::new(&vs.root(), filter_count),
-      policy_head: PolicyHead::new(&vs.root(), filter_count),
-    }
-  }
-
-  pub fn forward(&self, xs: &Tensor) -> (Tensor, Tensor) {
-    let mut xs = self.iconv.forward(xs);
-    for b in &self.blocks {
-      xs = b.forward(&xs);
-    }
-    (self.value_head.forward(&xs), self.policy_head.forward(&xs))
-  }
-}
-
-fn main() {
-  let mut cfg_str = "".to_string();
-  File::open("config.toml")
-    .unwrap()
-    .read_to_string(&mut cfg_str)
-    .unwrap();
-  let config: Config = from_str(&cfg_str).unwrap();
-
-  let vs = nn::VarStore::new(Device::cuda_if_available());
-  let net = NN::new(10, 128, &vs);
-  let mut opt = nn::sgd(0.9, 0.0, 0.001, true)
-    .build(&vs, config.training.lr)
-    .unwrap();
-
-  let mut data = Data::new(config.training.batch_size, config.workers);
-  let mut running_loss = Tensor::of_slice(&[0.0])
-    .to_device(Device::cuda_if_available())
-    .detach();
-
-  let output_path = config.output_path.clone();
-  set_handler(move || {
-    exit(0);
-  })
-  .expect("Error setting Ctrl-C handler.");
-  for (step, (x, y)) in (&mut data).enumerate() {
-    let (value, policy) = net.forward(&x);
-    let value_loss = value.mse_loss(&y, tch::Reduction::Mean);
-    let policy_loss = policy.cross_entropy_for_logits(&y);
-    let total_loss = value_loss + policy_loss;
-    opt.backward_step(&total_loss);
-    running_loss += &total_loss.detach();
-
-    if step % config.report_freq == config.report_freq - 1 {
-      println!(
-        "step {} loss {:?}",
-        step + 1,
-        (&running_loss /
-          Tensor::of_slice(&[config.report_freq as f32])
-            .to_device(Device::cuda_if_available())
-            .detach())
-      );
-      running_loss = Tensor::of_slice(&[0.0])
-        .to_device(Device::cuda_if_available())
-        .detach();
-    }
-    drop(x);
-    drop(y);
   }
 }
 
