@@ -558,6 +558,7 @@ dependencies = [
  "serde_derive",
  "tch",
  "toml",
+ "torch-sys",
 ]
 
 [[package]]
